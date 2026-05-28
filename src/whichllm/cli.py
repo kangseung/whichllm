@@ -748,6 +748,37 @@ def _resolve_ranked_gguf_for_run(
     return model, variant
 
 
+def _check_gguf_arch_compatible(model) -> str | None:
+    """Check if a model's GGUF architecture is supported by llama-cpp-python.
+
+    Returns None if compatible, or a reason string if incompatible.
+    llama-cpp-python only supports architectures that upstream llama.cpp supports;
+    newly released models (e.g. DeepSeek-V4) may have GGUF files available but
+    require a custom runtime until upstream catches up.
+    """
+    # Known llama-cpp-python supported GGUF architectures
+    _SUPPORTED = {
+        "llama", "llama4", "qwen2", "qwen3", "mistral", "mixtral", "gemma",
+        "gemma2", "gemma3", "phi", "phi3", "starcoder", "command",
+        "deepseek", "deepseek2", "deepseek2-ocr",
+        "qwen2moe", "qwen2vl", "qwen3moe", "qwen3next",
+        "falcon", "baichuan", "grok", "gpt2", "gptj", "gptneox",
+        "mpt", "refact", "bloom", "stablelm", "phi2", "phi3",
+        "granite", "granitemoe", "exaone", "olmo", "olmo2", "olmoe",
+        "dbrx", "persimmon", "starcoder2", "internlm2", "internlm3",
+        "smollm", "airoboros", "bert", "nomic-bert", "jina-bert",
+        "mamba", "falconh", "plamo", "bitnet", "t5", "t5encoder",
+        "rwkv6", "rwkv5", "mistrallite", "yahma", "aquila",
+    }
+    arch = model.architecture.lower().strip()
+    if not arch or arch in _SUPPORTED:
+        return None
+    return (
+        f"GGUF architecture '{arch}' is not yet supported by llama-cpp-python. "
+        f"This model requires a custom or forked runtime."
+    )
+
+
 def _resolve_model_deps(model, variant) -> tuple[list[str], str]:
     """Determine pip dependencies and script type for a model.
 
@@ -972,6 +1003,7 @@ def run(
             console.print("[red]No runnable model found for your hardware.[/]")
             raise typer.Exit(code=1)
         skipped_gguf: list[str] = []
+        skipped_incompat: list[str] = []
         model = None
         for ranked in results:
             if ranked.gguf_variant:
@@ -983,6 +1015,13 @@ def run(
                 )
                 if resolved:
                     resolved_model, variant = resolved
+                    # Check GGUF architecture compatibility
+                    incompat = _check_gguf_arch_compatible(resolved_model)
+                    if incompat:
+                        skipped_incompat.append(
+                            (resolved_model.id, incompat)
+                        )
+                        continue
                     if resolved_model.id != ranked.model.id:
                         console.print(
                             "[dim]Resolved GGUF runtime: "
@@ -1005,6 +1044,11 @@ def run(
                 "[yellow]Warning:[/] Skipped GGUF-ranked candidate(s) without "
                 f"a matching runnable GGUF repo: {skipped}{suffix}"
             )
+        if skipped_incompat:
+            for mid, reason in skipped_incompat[:3]:
+                console.print(
+                    f"[yellow]Skipped:[/] {mid} — {reason}"
+                )
         if model is None:
             console.print(
                 "[red]Error:[/] Top recommendations require GGUF builds, "
@@ -1018,6 +1062,46 @@ def run(
 
     if variant is None:
         variant = _pick_gguf_variant(model, quant)
+
+    # Check GGUF architecture compatibility before proceeding
+    if variant:
+        incompat = _check_gguf_arch_compatible(model)
+        if incompat:
+            console.print(f"\n[yellow]Incompatible GGUF model:[/] {model.id}")
+            console.print(f"[dim]{incompat}[/]")
+            console.print(
+                "\nThis model cannot be auto-deployed with the default runtime. "
+                "Options:"
+            )
+            console.print(
+                "  1. [bold]Download only[/] — fetch weights for manual deployment"
+            )
+            console.print(
+                "  2. [bold]Pick another model[/] — auto-deploy a compatible one"
+            )
+            choice = input("\nChoose [1/2]: ").strip()
+            if choice == "1":
+                from huggingface_hub import snapshot_download
+                _mirror_env = os.environ.get("WHICHHF_MIRROR", "")
+                _mirror_endpoint = ""
+                if not os.environ.get("HF_ENDPOINT") and _mirror_env:
+                    from whichllm.mirror import _MIRROR_PROFILES
+                    _mp = _MIRROR_PROFILES.get(_mirror_env)
+                    if _mp:
+                        _mirror_endpoint = f'https://{_mp["hf"]}'
+                if _mirror_endpoint:
+                    os.environ["HF_ENDPOINT"] = _mirror_endpoint
+                _pattern = os.path.dirname(variant.filename) + "/*" if "/" in variant.filename else "*.gguf"
+                local_dir = snapshot_download(repo_id=model.id, allow_patterns=_pattern)
+                console.print(f"\n[green]Downloaded to:[/] {local_dir}")
+                console.print(
+                    "[dim]Deploy manually with a compatible runtime.[/]"
+                )
+                raise typer.Exit()
+            else:
+                console.print("[dim]Please run again with a different model.[/]")
+                raise typer.Exit(code=1)
+
     deps, script_type = _resolve_model_deps(model, variant)
     script = _generate_chat_script(model, variant, context_length, cpu_only)
 
