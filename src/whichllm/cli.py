@@ -795,7 +795,8 @@ try:
         _dir = os.path.dirname(_filename)
         _pattern = (_dir + "/*") if _dir else "*.gguf"
         _local_dir = snapshot_download(repo_id="{model.id}", allow_patterns=_pattern)
-        model_path = os.path.join(_local_dir, _filename)
+        _first = re.sub(r'-\\d+-of-(\\d+)\\.gguf$', r'-00001-of-\\1.gguf', _filename)
+        model_path = os.path.join(_local_dir, _first)
     else:
         model_path = hf_hub_download(repo_id="{model.id}", filename=_filename)
 except Exception as e:
